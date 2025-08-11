@@ -44,6 +44,14 @@ function broadcast(data) {
   });
 }
 
+// Normalize an incoming Solana address-like string by extracting a base58
+// segment of length 32-44. Returns the original trimmed string if no match.
+function normalizeSolanaAddress(input) {
+  const value = String(input || "").trim();
+  const match = value.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/);
+  return match ? match[0] : value;
+}
+
 subscriber.subscribe("new_contracts", (err) => {
   if (err) {
     console.error("Failed to subscribe to Redis channel:", err);
@@ -117,13 +125,14 @@ app.get("/contracts", async (req, res) => {
 app.get("/token-info/:address", async (req, res) => {
   try {
     const { address } = req.params;
+    const normalizedAddress = normalizeSolanaAddress(address);
 
-    if (!address) {
+    if (!normalizedAddress) {
       return res.status(400).json({ error: "Token address is required" });
     }
 
     // Check Redis cache first (cache for 5 minutes)
-    const cacheKey = `token_info:${address}`;
+    const cacheKey = `token_info:${normalizedAddress}`;
     const cachedData = await redis.get(cacheKey);
 
     if (cachedData) {
@@ -142,12 +151,14 @@ app.get("/token-info/:address", async (req, res) => {
 
     // Find profile for this token
     const tokenProfile = profileData.find(
-      (profile) => profile.tokenAddress.toLowerCase() === address.toLowerCase()
+      (profile) =>
+        (profile.tokenAddress || "").toLowerCase() ===
+        normalizedAddress.toLowerCase()
     );
 
     // Also fetch from the trading pairs API for price/market data
     const pairsResponse = await fetch(
-      `https://api.dexscreener.com/tokens/v1/solana/${address}`
+      `https://api.dexscreener.com/tokens/v1/solana/${normalizedAddress}`
     );
 
     let pairsData = [];
@@ -157,7 +168,7 @@ app.get("/token-info/:address", async (req, res) => {
 
     // Extract useful information
     const tokenInfo = {
-      address,
+      address: normalizedAddress,
       pairs: pairsData || [],
       // Get the best pair (first one is usually the main pair)
       bestPair: pairsData?.[0] || null,
@@ -191,11 +202,23 @@ app.get("/token-info/:address", async (req, res) => {
       tokenInfo.pairAddress = tokenInfo.bestPair.pairAddress; // This is what we need for the buy URL
     }
 
+    // Non-Moralis icon fallback from DexScreener if available
+    if (!tokenInfo.icon) {
+      const dsIcon =
+        tokenInfo.profile?.icon ||
+        tokenInfo.bestPair?.info?.imageUrl ||
+        tokenInfo.bestPair?.baseToken?.logo ||
+        tokenInfo.bestPair?.baseToken?.icon ||
+        null;
+      if (dsIcon) tokenInfo.icon = dsIcon;
+    }
+
     // Prefer Moralis for icon (logo) when available
     try {
-      const moralisAddress = tokenInfo?.bestPair?.baseToken?.address || address;
+      const moralisAddress =
+        tokenInfo?.bestPair?.baseToken?.address || normalizedAddress;
       console.log(
-        `[Moralis] Requesting metadata for ${address} (envKey=${Boolean(
+        `[Moralis] Requesting metadata for ${normalizedAddress} (envKey=${Boolean(
           process.env.MORALIS_API_KEY
         )}) using mint=${moralisAddress}`
       );
@@ -209,13 +232,16 @@ app.get("/token-info/:address", async (req, res) => {
           },
         }
       );
-      console.log(
-        `[Moralis] Response status for ${moralisAddress}: ${moralisResp.status}`
-      );
       if (!moralisResp.ok) {
-        console.warn(
-          `Moralis metadata fetch failed for ${moralisAddress}: HTTP ${moralisResp.status}`
-        );
+        if (moralisResp.status === 404) {
+          console.log(
+            `[Moralis] 404 for ${moralisAddress} (likely not indexed yet)`
+          );
+        } else {
+          console.warn(
+            `Moralis metadata fetch failed for ${moralisAddress}: HTTP ${moralisResp.status}`
+          );
+        }
       } else {
         const moralisJson = await moralisResp.json();
         const moralisLogo = moralisJson?.logo;
@@ -228,9 +254,6 @@ app.get("/token-info/:address", async (req, res) => {
         };
         if (moralisLogo) {
           tokenInfo.icon = moralisLogo;
-          console.log(
-            `[Moralis] Logo found for ${moralisAddress}: ${moralisLogo}`
-          );
         } else {
           console.warn(`Moralis returned no logo for ${moralisAddress}`);
         }
