@@ -8,7 +8,6 @@ import crypto from "crypto";
 import "dotenv/config";
 
 const PORT = 4000;
-// Prefer env, but fall back to provided key for local/dev if not set
 const MORALIS_API_KEY =
   process.env.MORALIS_API_KEY ||
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjdiMmI3NDljLWM5MzctNDczMi05MDlhLTMxZDBhYTg1MmRiZCIsIm9yZ0lkIjoiNDMyMjM4IiwidXNlcklkIjoiNDQ0NjE5IiwidHlwZUlkIjoiMjdmZTdmYmMtNTY2NS00YWZjLWJlNTctODIwOWQwZjhlNGRhIiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3Mzk4NzQxMzAsImV4cCI6NDg5NTYzNDEzMH0.VaTcj5x_esHxnOQwiA5gGQ7-Sk-3zIyl0bW0ZP_GT2o";
@@ -42,6 +41,69 @@ function broadcast(data) {
       client.send(data);
     }
   });
+}
+
+// Attempt to enrich cached token info with Moralis metadata in the background
+async function attemptMoralisEnrich(mint, cacheKey) {
+  try {
+    const resp = await fetch(
+      `https://solana-gateway.moralis.io/token/mainnet/${mint}/metadata`,
+      {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+          "X-API-Key": MORALIS_API_KEY,
+        },
+      }
+    );
+    if (!resp.ok) {
+      if (resp.status === 404) {
+        console.log(`[Moralis] Retry still 404 for ${mint}`);
+      } else {
+        console.warn(`Moralis retry failed for ${mint}: HTTP ${resp.status}`);
+      }
+      return;
+    }
+    const json = await resp.json();
+    const cached = await redis.get(cacheKey);
+    if (!cached) return;
+    const tokenInfo = JSON.parse(cached);
+    const moralisLogo = json?.logo;
+    tokenInfo.moralis = {
+      mint: json?.mint,
+      name: json?.name,
+      symbol: json?.symbol,
+      logo: moralisLogo || null,
+      tokenStandard: json?.tokenStandard,
+    };
+    if (moralisLogo) {
+      tokenInfo.icon = moralisLogo;
+    }
+    // Refresh cache TTL
+    await redis.setex(cacheKey, 300, JSON.stringify(tokenInfo));
+    console.log(`[Moralis] Background enrich success for ${mint}`);
+  } catch (e) {
+    console.warn("Moralis background enrich error", e?.message || e);
+  }
+}
+
+// Schedule a single background retry guarded by a Redis lock
+async function scheduleMoralisRetry(mint, cacheKey) {
+  try {
+    const lockKey = `moralis_retry_lock:${mint}`;
+    // NX ensures only one retry is scheduled; EX guards for 5 minutes
+    const lock = await redis.set(lockKey, "1", "NX", "EX", 300);
+    if (!lock) return;
+    setTimeout(() => {
+      attemptMoralisEnrich(mint, cacheKey).finally(() => {
+        // Best-effort release; lock will also auto-expire
+        redis.del(lockKey).catch(() => {});
+      });
+    }, 20000); // retry after 20s
+    console.log(`[Moralis] Scheduled background retry for ${mint}`);
+  } catch (e) {
+    console.warn("Failed to schedule Moralis retry", e?.message || e);
+  }
 }
 
 // Normalize an incoming Solana address-like string by extracting a base58
@@ -237,6 +299,8 @@ app.get("/token-info/:address", async (req, res) => {
           console.log(
             `[Moralis] 404 for ${moralisAddress} (likely not indexed yet)`
           );
+          // Try a background retry to enrich cache once indexed
+          await scheduleMoralisRetry(moralisAddress, cacheKey);
         } else {
           console.warn(
             `Moralis metadata fetch failed for ${moralisAddress}: HTTP ${moralisResp.status}`
