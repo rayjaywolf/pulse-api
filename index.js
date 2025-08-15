@@ -139,7 +139,7 @@ app.get("/contracts", async (req, res) => {
       const result = [];
       for (const item of events) {
         try {
-          const { address, channelName } = JSON.parse(item);
+          const { address, channelName, ts } = JSON.parse(item);
           let ch = (channelName || "basic").toString().toLowerCase();
           if (!allowed.has(ch)) continue;
           // Normalize legacy values to new ones in the response array
@@ -147,7 +147,7 @@ app.get("/contracts", async (req, res) => {
           if (ch === "nitro") ch = "premium";
           if (seen.has(address)) continue;
           seen.add(address);
-          result.push([address, ch]);
+          result.push([address, ch, ts || Date.now()]);
         } catch (_) {}
       }
       // Newest-first already (we LPUSH in the bot)
