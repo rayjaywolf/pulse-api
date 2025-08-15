@@ -347,32 +347,6 @@ app.get("/token-info/:address", async (req, res) => {
   }
 });
 
-// Background job to mark expired licenses as revoked
-async function markExpiredLicensesAsRevoked() {
-  try {
-    const result = await pgPool.query(
-      `UPDATE licenses 
-       SET revoked = true 
-       WHERE expires_at <= NOW() 
-       AND revoked = false`
-    );
-
-    if (result.rowCount > 0) {
-      console.log(
-        `[License Expiry] Marked ${result.rowCount} expired licenses as revoked`
-      );
-    }
-  } catch (err) {
-    console.error("[License Expiry] Error marking expired licenses:", err);
-  }
-}
-
-// Run expiry check every 30 minutes
-setInterval(markExpiredLicensesAsRevoked, 30 * 60 * 1000);
-
-// Run initial expiry check on startup
-markExpiredLicensesAsRevoked();
-
 server.listen(PORT, () => {
   console.log(`API Server listening on http://localhost:${PORT}`);
 });
@@ -419,6 +393,43 @@ function addDays(date, days) {
 ensureLicenseTable().catch((e) => {
   console.error("Failed to ensure licenses table:", e);
 });
+
+// Background job to mark expired licenses as revoked
+async function markExpiredLicensesAsRevoked() {
+  try {
+    const result = await pgPool.query(
+      `UPDATE licenses 
+       SET revoked = true 
+       WHERE expires_at <= NOW() 
+       AND revoked = false`
+    );
+
+    if (result.rowCount > 0) {
+      console.log(
+        `[License Expiry] Marked ${result.rowCount} expired licenses as revoked`
+      );
+    }
+  } catch (err) {
+    console.error("[License Expiry] Error marking expired licenses:", err);
+  }
+}
+
+// Initialize background job after database is ready
+ensureLicenseTable()
+  .then(() => {
+    // Run expiry check every 30 minutes
+    setInterval(markExpiredLicensesAsRevoked, 30 * 60 * 1000);
+
+    // Run initial expiry check on startup
+    markExpiredLicensesAsRevoked();
+
+    console.log(
+      "[License Expiry] Background job initialized - runs every 30 minutes"
+    );
+  })
+  .catch((e) => {
+    console.error("Failed to initialize license expiry background job:", e);
+  });
 
 // Purchase a license (free for now), returns a license key
 // Body: { tier: "monthly" | "yearly" }
