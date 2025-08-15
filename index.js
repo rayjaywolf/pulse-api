@@ -347,6 +347,32 @@ app.get("/token-info/:address", async (req, res) => {
   }
 });
 
+// Background job to mark expired licenses as revoked
+async function markExpiredLicensesAsRevoked() {
+  try {
+    const result = await pgPool.query(
+      `UPDATE licenses 
+       SET revoked = true 
+       WHERE expires_at <= NOW() 
+       AND revoked = false`
+    );
+
+    if (result.rowCount > 0) {
+      console.log(
+        `[License Expiry] Marked ${result.rowCount} expired licenses as revoked`
+      );
+    }
+  } catch (err) {
+    console.error("[License Expiry] Error marking expired licenses:", err);
+  }
+}
+
+// Run expiry check every 30 minutes
+setInterval(markExpiredLicensesAsRevoked, 30 * 60 * 1000);
+
+// Run initial expiry check on startup
+markExpiredLicensesAsRevoked();
+
 server.listen(PORT, () => {
   console.log(`API Server listening on http://localhost:${PORT}`);
 });
@@ -421,7 +447,7 @@ app.post("/license/purchase", async (req, res) => {
 });
 
 // Status: validates a license key if provided via query (?key=)
-// Response: { active, tier?, expiresAt? }
+// Response: { active, tier?, expiresAt?, revoked, expired }
 app.get("/license/status", async (req, res) => {
   try {
     const key = (req.query.key || "").toString().trim();
@@ -435,14 +461,94 @@ app.get("/license/status", async (req, res) => {
     if (!rows.length) return res.json({ active: false });
     const lic = rows[0];
     const now = new Date();
-    const active = !lic.revoked && new Date(lic.expires_at) > now;
+    const expiresAt = new Date(lic.expires_at);
+    const expired = expiresAt <= now;
+    const active = !lic.revoked && !expired;
+
     res.json({
       active,
       tier: lic.tier,
-      expiresAt: new Date(lic.expires_at).toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      revoked: lic.revoked,
+      expired,
     });
   } catch (err) {
     console.error("/license/status error", err);
     res.status(200).json({ active: false });
+  }
+});
+
+// Generate a license key and save to database
+// Body: { tier: "monthly" | "yearly" }
+app.post("/license/generate", async (req, res) => {
+  try {
+    const { tier } = req.body || {};
+    if (!tier || !["monthly", "yearly"].includes(tier)) {
+      return res.status(400).json({ error: "Invalid tier" });
+    }
+
+    const licenseKey = generateLicenseKey();
+    const now = new Date();
+    const expiresAt = tier === "yearly" ? addDays(now, 365) : addDays(now, 30);
+
+    await pgPool.query(
+      `INSERT INTO licenses (license_key, tier, created_at, expires_at, revoked)
+       VALUES ($1, $2, now(), $3, false)`,
+      [licenseKey, tier, expiresAt]
+    );
+
+    res.json({
+      key: licenseKey,
+      tier,
+      expiresAt: expiresAt.toISOString(),
+      generatedAt: now.toISOString(),
+    });
+  } catch (err) {
+    console.error("/license/generate error", err);
+    res.status(500).json({ error: "Failed to generate license" });
+  }
+});
+
+// Get all generated license keys
+app.get("/license/keys", async (req, res) => {
+  try {
+    const { rows } = await pgPool.query(
+      `SELECT license_key, tier, created_at, expires_at, revoked 
+       FROM licenses 
+       ORDER BY created_at DESC`
+    );
+
+    const licenses = rows.map((row) => ({
+      key: row.license_key,
+      tier: row.tier,
+      expiresAt: new Date(row.expires_at).toISOString(),
+      generatedAt: new Date(row.created_at).toISOString(),
+      revoked: row.revoked,
+    }));
+
+    res.json(licenses);
+  } catch (err) {
+    console.error("/license/keys error", err);
+    res.status(500).json({ error: "Failed to fetch licenses" });
+  }
+});
+
+// Revoke a license key
+app.delete("/license/keys/:key", async (req, res) => {
+  try {
+    const { key } = req.params;
+    const { rows } = await pgPool.query(
+      `UPDATE licenses SET revoked = true WHERE license_key = $1 RETURNING *`,
+      [key]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "License not found" });
+    }
+
+    res.json({ message: "License revoked successfully" });
+  } catch (err) {
+    console.error("/license/keys/:key DELETE error", err);
+    res.status(500).json({ error: "Failed to revoke license" });
   }
 });
