@@ -132,6 +132,7 @@ app.get("/contracts", async (req, res) => {
     // Prefer sorted order by recency using a Redis list of events.
     // Fallback to unsorted hash merge if list is not available.
     const events = await redis.lrange("contract_events", 0, -1);
+    console.log(`[API] Found ${events ? events.length : 0} events in Redis`);
     if (events && events.length > 0) {
       // Support new labels (basic/premium) and gracefully map legacy (calls/nitro)
       const allowed = new Set(["basic", "premium", "calls", "nitro"]);
@@ -147,16 +148,23 @@ app.get("/contracts", async (req, res) => {
           if (ch === "nitro") ch = "premium";
           if (seen.has(address)) continue;
           seen.add(address);
-          result.push([address, ch, ts || Date.now()]);
+          // Ensure timestamp is a number
+          const timestamp = ts ? parseInt(ts, 10) : Date.now();
+          result.push([address, ch, timestamp]);
         } catch (_) {}
       }
       // Newest-first already (we LPUSH in the bot)
+      console.log(
+        `[API] Returning array format with ${result.length} items and timestamps`
+      );
       res.json(result);
       return;
     }
 
     // Fallback: merge hashes (order unspecified)
-    // Prefer new keys if present, but still include legacy
+    console.log(
+      `[API] No events found, falling back to hash merge (no timestamps)`
+    );
     const basic = await redis.hgetall("contract_origins:basic");
     const premium = await redis.hgetall("contract_origins:premium");
     const calls = await redis.hgetall("contract_origins:calls");
