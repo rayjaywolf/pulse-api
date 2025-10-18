@@ -15,7 +15,7 @@ const MORALIS_API_KEY =
 const app = express();
 app.use(
   cors({
-    origin: true, // reflect request origin
+    origin: true,
     credentials: true,
   })
 );
@@ -37,13 +37,11 @@ wss.on("connection", (ws) => {
 function broadcast(data) {
   wss.clients.forEach((client) => {
     if (client.readyState === 1) {
-      // 1 means OPEN
       client.send(data);
     }
   });
 }
 
-// Attempt to enrich cached token info with Moralis metadata in the background
 async function attemptMoralisEnrich(mint, cacheKey) {
   try {
     const resp = await fetch(
@@ -79,7 +77,6 @@ async function attemptMoralisEnrich(mint, cacheKey) {
     if (moralisLogo) {
       tokenInfo.icon = moralisLogo;
     }
-    // Refresh cache TTL
     await redis.setex(cacheKey, 300, JSON.stringify(tokenInfo));
     console.log(`[Moralis] Background enrich success for ${mint}`);
   } catch (e) {
@@ -87,27 +84,22 @@ async function attemptMoralisEnrich(mint, cacheKey) {
   }
 }
 
-// Schedule a single background retry guarded by a Redis lock
 async function scheduleMoralisRetry(mint, cacheKey) {
   try {
     const lockKey = `moralis_retry_lock:${mint}`;
-    // NX ensures only one retry is scheduled; EX guards for 5 minutes
     const lock = await redis.set(lockKey, "1", "NX", "EX", 300);
     if (!lock) return;
     setTimeout(() => {
       attemptMoralisEnrich(mint, cacheKey).finally(() => {
-        // Best-effort release; lock will also auto-expire
         redis.del(lockKey).catch(() => {});
       });
-    }, 20000); // retry after 20s
+    }, 20000);
     console.log(`[Moralis] Scheduled background retry for ${mint}`);
   } catch (e) {
     console.warn("Failed to schedule Moralis retry", e?.message || e);
   }
 }
 
-// Normalize an incoming Solana address-like string by extracting a base58
-// segment of length 32-44. Returns the original trimmed string if no match.
 function normalizeSolanaAddress(input) {
   const value = String(input || "").trim();
   const match = value.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/);
@@ -129,12 +121,9 @@ subscriber.on("message", (channel, message) => {
 
 app.get("/contracts", async (req, res) => {
   try {
-    // Prefer sorted order by recency using a Redis list of events.
-    // Fallback to unsorted hash merge if list is not available.
     const events = await redis.lrange("contract_events", 0, -1);
     console.log(`[API] Found ${events ? events.length : 0} events in Redis`);
     if (events && events.length > 0) {
-      // Support new labels (basic/premium) and gracefully map legacy (calls/nitro)
       const allowed = new Set(["basic", "premium", "calls", "nitro"]);
       const seen = new Set();
       const result = [];
@@ -143,17 +132,14 @@ app.get("/contracts", async (req, res) => {
           const { address, channelName, ts } = JSON.parse(item);
           let ch = (channelName || "basic").toString().toLowerCase();
           if (!allowed.has(ch)) continue;
-          // Normalize legacy values to new ones in the response array
           if (ch === "calls") ch = "basic";
           if (ch === "nitro") ch = "premium";
           if (seen.has(address)) continue;
           seen.add(address);
-          // Ensure timestamp is a number
           const timestamp = ts ? parseInt(ts, 10) : Date.now();
           result.push([address, ch, timestamp]);
         } catch (_) {}
       }
-      // Newest-first already (we LPUSH in the bot)
       console.log(
         `[API] Returning array format with ${result.length} items and timestamps`
       );
@@ -161,7 +147,6 @@ app.get("/contracts", async (req, res) => {
       return;
     }
 
-    // Fallback: merge hashes (order unspecified)
     console.log(
       `[API] No events found, falling back to hash merge (no timestamps)`
     );
@@ -171,14 +156,12 @@ app.get("/contracts", async (req, res) => {
     const nitro = await redis.hgetall("contract_origins:nitro");
     const legacy = await redis.hgetall("contract_origins");
     const combined = { ...(legacy || {}) };
-    // Merge new labels first
     Object.entries(basic || {}).forEach(([addr, channel]) => {
       combined[addr] = "basic";
     });
     Object.entries(premium || {}).forEach(([addr, channel]) => {
       combined[addr] = "premium";
     });
-    // Merge legacy and normalize to new labels
     Object.entries(calls || {}).forEach(([addr, channel]) => {
       combined[addr] = "basic";
     });
@@ -191,7 +174,6 @@ app.get("/contracts", async (req, res) => {
   }
 });
 
-// Fetch token information from DexScreener API
 app.get("/token-info/:address", async (req, res) => {
   try {
     const { address } = req.params;
@@ -201,7 +183,6 @@ app.get("/token-info/:address", async (req, res) => {
       return res.status(400).json({ error: "Token address is required" });
     }
 
-    // Check Redis cache first (cache for 5 minutes)
     const cacheKey = `token_info:${normalizedAddress}`;
     const cachedData = await redis.get(cacheKey);
 
@@ -209,7 +190,6 @@ app.get("/token-info/:address", async (req, res) => {
       return res.json(JSON.parse(cachedData));
     }
 
-    // First try DexScreener token profiles API for metadata
     const profileResponse = await fetch(
       `https://api.dexscreener.com/token-profiles/latest/v1`
     );
@@ -219,14 +199,12 @@ app.get("/token-info/:address", async (req, res) => {
       profileData = await profileResponse.json();
     }
 
-    // Find profile for this token
     const tokenProfile = profileData.find(
       (profile) =>
         (profile.tokenAddress || "").toLowerCase() ===
         normalizedAddress.toLowerCase()
     );
 
-    // Also fetch from the trading pairs API for price/market data
     const pairsResponse = await fetch(
       `https://api.dexscreener.com/tokens/v1/solana/${normalizedAddress}`
     );
@@ -236,16 +214,13 @@ app.get("/token-info/:address", async (req, res) => {
       pairsData = await pairsResponse.json();
     }
 
-    // Extract useful information
     const tokenInfo = {
       address: normalizedAddress,
       pairs: pairsData || [],
-      // Get the best pair (first one is usually the main pair)
       bestPair: pairsData?.[0] || null,
       profile: tokenProfile || null,
     };
 
-    // Add profile info if available (name, symbol, icon)
     if (tokenProfile) {
       tokenInfo.name = tokenProfile.name;
       tokenInfo.symbol = tokenProfile.symbol;
@@ -254,9 +229,7 @@ app.get("/token-info/:address", async (req, res) => {
       tokenInfo.links = tokenProfile.links;
     }
 
-    // Add trading data if available
     if (tokenInfo.bestPair) {
-      // Use profile data if available, otherwise fall back to trading data
       if (!tokenInfo.name) tokenInfo.name = tokenInfo.bestPair.baseToken?.name;
       if (!tokenInfo.symbol)
         tokenInfo.symbol = tokenInfo.bestPair.baseToken?.symbol;
@@ -269,10 +242,9 @@ app.get("/token-info/:address", async (req, res) => {
         tokenInfo.bestPair.marketCap || tokenInfo.bestPair.fdv;
       tokenInfo.dexId = tokenInfo.bestPair.dexId;
       tokenInfo.chainId = tokenInfo.bestPair.chainId;
-      tokenInfo.pairAddress = tokenInfo.bestPair.pairAddress; // This is what we need for the buy URL
+      tokenInfo.pairAddress = tokenInfo.bestPair.pairAddress;
     }
 
-    // Non-Moralis icon fallback from DexScreener if available
     if (!tokenInfo.icon) {
       const dsIcon =
         tokenInfo.profile?.icon ||
@@ -283,7 +255,6 @@ app.get("/token-info/:address", async (req, res) => {
       if (dsIcon) tokenInfo.icon = dsIcon;
     }
 
-    // Prefer Moralis for icon (logo) when available
     try {
       const moralisAddress =
         tokenInfo?.bestPair?.baseToken?.address || normalizedAddress;
@@ -307,7 +278,6 @@ app.get("/token-info/:address", async (req, res) => {
           console.log(
             `[Moralis] 404 for ${moralisAddress} (likely not indexed yet)`
           );
-          // Try a background retry to enrich cache once indexed
           await scheduleMoralisRetry(moralisAddress, cacheKey);
         } else {
           console.warn(
@@ -334,7 +304,6 @@ app.get("/token-info/:address", async (req, res) => {
       console.warn("Moralis logo fetch error", e?.message || e);
     }
 
-    // Cache for 5 minutes
     await redis.setex(cacheKey, 300, JSON.stringify(tokenInfo));
 
     res.json(tokenInfo);
@@ -350,10 +319,6 @@ app.get("/token-info/:address", async (req, res) => {
 server.listen(PORT, () => {
   console.log(`API Server listening on http://localhost:${PORT}`);
 });
-
-// ----------------------------
-// Licensing: Postgres storage
-// ----------------------------
 
 const DATABASE_URL =
   process.env.DATABASE_URL ||
@@ -378,7 +343,6 @@ async function ensureLicenseTable() {
 
 function generateLicenseKey() {
   const bytes = crypto.randomBytes(10).toString("hex").toUpperCase();
-  // Make groups of 4: XXXX-XXXX-XXXX-XXXX-XXXX
   const groups = bytes.match(/.{1,4}/g).slice(0, 5);
   return `PLS-${groups.join("-")}`;
 }
@@ -389,12 +353,10 @@ function addDays(date, days) {
   return d;
 }
 
-// Call on boot
 ensureLicenseTable().catch((e) => {
   console.error("Failed to ensure licenses table:", e);
 });
 
-// Background job to mark expired licenses as revoked
 async function markExpiredLicensesAsRevoked() {
   try {
     const result = await pgPool.query(
@@ -414,13 +376,10 @@ async function markExpiredLicensesAsRevoked() {
   }
 }
 
-// Initialize background job after database is ready
 ensureLicenseTable()
   .then(() => {
-    // Run expiry check every 30 minutes
     setInterval(markExpiredLicensesAsRevoked, 30 * 60 * 1000);
 
-    // Run initial expiry check on startup
     markExpiredLicensesAsRevoked();
 
     console.log(
@@ -431,8 +390,6 @@ ensureLicenseTable()
     console.error("Failed to initialize license expiry background job:", e);
   });
 
-// Purchase a license (free for now), returns a license key
-// Body: { tier: "monthly" | "yearly" }
 app.post("/license/purchase", async (req, res) => {
   try {
     const { tier } = req.body || {};
@@ -457,8 +414,6 @@ app.post("/license/purchase", async (req, res) => {
   }
 });
 
-// Status: validates a license key if provided via query (?key=)
-// Response: { active, tier?, expiresAt?, revoked, expired }
 app.get("/license/status", async (req, res) => {
   try {
     const key = (req.query.key || "").toString().trim();
@@ -489,8 +444,6 @@ app.get("/license/status", async (req, res) => {
   }
 });
 
-// Generate a license key and save to database
-// Body: { tier: "monthly" | "yearly" }
 app.post("/license/generate", async (req, res) => {
   try {
     const { tier } = req.body || {};
@@ -520,7 +473,6 @@ app.post("/license/generate", async (req, res) => {
   }
 });
 
-// Get all generated license keys
 app.get("/license/keys", async (req, res) => {
   try {
     const { rows } = await pgPool.query(
@@ -544,7 +496,6 @@ app.get("/license/keys", async (req, res) => {
   }
 });
 
-// Revoke a license key
 app.delete("/license/keys/:key", async (req, res) => {
   try {
     const { key } = req.params;

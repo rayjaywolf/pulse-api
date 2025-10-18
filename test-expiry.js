@@ -13,7 +13,6 @@ async function testExpirySystem() {
   try {
     console.log("🧪 Testing License Expiry System");
 
-    // 1. Create a test license that's already expired (1 day ago)
     const testKey = `test-expired-${Date.now()}`;
     const oneDayAgo = new Date();
     oneDayAgo.setDate(oneDayAgo.getDate() - 1);
@@ -25,7 +24,6 @@ async function testExpirySystem() {
     );
     console.log(`✓ Created expired test license: ${testKey}`);
 
-    // 2. Check that it's not revoked yet
     let result = await pgPool.query(
       `SELECT revoked, expires_at FROM licenses WHERE license_key = $1`,
       [testKey]
@@ -34,8 +32,7 @@ async function testExpirySystem() {
       `✓ License revoked status before expiry job: ${result.rows[0].revoked}`
     );
 
-    // 3. Run the expiry function manually
-    const updateResult = await pgPool.query(
+      const updateResult = await pgPool.query(
       `UPDATE licenses 
        SET revoked = true 
        WHERE expires_at <= NOW() 
@@ -45,7 +42,6 @@ async function testExpirySystem() {
       `✓ Expiry job processed ${updateResult.rowCount} expired licenses`
     );
 
-    // 4. Check that our test license is now revoked
     result = await pgPool.query(
       `SELECT revoked, expires_at FROM licenses WHERE license_key = $1`,
       [testKey]
@@ -54,14 +50,12 @@ async function testExpirySystem() {
       `✓ License revoked status after expiry job: ${result.rows[0].revoked}`
     );
 
-    // 5. Test the /license/status endpoint behavior
-    const statusResponse = await fetch(
+        const statusResponse = await fetch(
       `http://localhost:4000/license/status?key=${testKey}`
     );
     const statusData = await statusResponse.json();
     console.log(`✓ Status endpoint response:`, statusData);
 
-    // 6. Cleanup - delete test license
     await pgPool.query(`DELETE FROM licenses WHERE license_key = $1`, [
       testKey,
     ]);
